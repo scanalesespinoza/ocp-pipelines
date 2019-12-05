@@ -1,0 +1,93 @@
+def projectname = 'cnad'
+def appname = 'httpd-example-for-pipeline'
+pipeline {
+  agent {
+    node {
+      label 'maven' 
+    }
+  }
+  options {
+    timeout(time: 20, unit: 'MINUTES') 
+  }
+  stages {
+    stage('preamble') {
+        steps {
+            script {
+                openshift.withCluster() {
+                    openshift.withProject(projectname+'-develop') {
+                        echo "Using project: ${openshift.project()}"
+                    }
+                }
+            }
+        }
+    }
+    stage('cleanup') {
+      steps {
+        script {
+            openshift.withCluster() {
+                openshift.withProject(projectname+'-develop') {
+                  openshift.selector("all", [ app : appname ]).delete() 
+                  if (openshift.selector("secrets", appname).exists()) { 
+                    openshift.selector("secrets", appname).delete()
+                  }
+                }
+            }
+        }
+      }
+    }
+    stage('create') {
+      steps {
+        script {
+            openshift.withCluster() {
+                openshift.withProject(projectname+'-develop') {
+                  openshift.newApp("${appname} -p PROJECT=${projectname} -p STAGE='-develop'") 
+                }
+            }
+        }
+      }
+    }
+    stage('build') {
+      steps {
+        script {
+            openshift.withCluster() {
+                openshift.withProject(projectname+'-develop') {
+                  def builds = openshift.selector("bc", appname).startBuild()
+                  timeout(5) { 
+                    builds.untilEach(1) {
+                      return (it.object().status.phase == "Complete")
+                    }
+                  }
+                }
+            }
+        }
+      }
+    }
+    stage('deploy') {
+      steps {
+        script {
+            openshift.withCluster() {
+                openshift.withProject(projectname+'-develop') {
+                  def rm = openshift.selector("dc", appname).rollout().latest()
+                  timeout(5) { 
+                    openshift.selector("dc", appname).related('pods').untilEach(1) {
+                      return (it.object().status.phase == "Running")
+                    }
+                  }
+                }
+            }
+        }
+      }
+    }
+    stage('tag') {
+      steps {
+        script {
+            openshift.withCluster() {
+                openshift.withProject(projectname+'-develop') {
+                  openshift.tag("${appname}:latest", "${appname}-staging:latest") 
+                }
+            }
+        }
+      }
+    }
+  }
+}
